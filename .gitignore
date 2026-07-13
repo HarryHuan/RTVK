@@ -1,0 +1,35 @@
+# Build
+build/
+out/
+*.o
+*.obj
+*.exe
+*.dll
+*.lib
+*.exp
+*.pdb
+
+# IDE
+.vs/
+.idea/
+*.user
+*.suo
+.vscode/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+*.cmake
+
+# Qt / MOC
+moc_*.cpp
+ui_*.h
+qrc_*.cpp
+
+# SPIR-V
+*.spv
+
+# OS
+Thumbs.db
+Desktop.ini
