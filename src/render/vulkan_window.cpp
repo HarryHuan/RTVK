@@ -2,15 +2,19 @@
 #include <QFile>
 #include <QTimer>
 #include <QDebug>
+#include <QCoreApplication>
+#include <QWidget>
 #include <set>
 #include <stdexcept>
 
 namespace rtvk::render {
 
 // ── helpers ──────────────────────────────────────────────────
-static std::vector<char> readFile(const QString &path) {
-    QFile f(path);
-    if (!f.open(QIODevice::ReadOnly)) throw std::runtime_error("no shader: " + path.toStdString());
+static std::vector<char> readFile(const QString &relPath) {
+    QString fullPath = QCoreApplication::applicationDirPath() + "/" + relPath;
+    QFile f(fullPath);
+    if (!f.open(QIODevice::ReadOnly))
+        throw std::runtime_error("no shader: " + fullPath.toStdString());
     QByteArray d = f.readAll();
     return {d.begin(), d.end()};
 }
@@ -18,27 +22,43 @@ static VkShaderModule createShader(VkDevice d, const std::vector<char> &code) {
     VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     ci.codeSize=code.size(); ci.pCode=reinterpret_cast<const uint32_t*>(code.data());
     VkShaderModule m;
-    if (vkCreateShaderModule(d,&ci,nullptr,&m)!=VK_SUCCESS) throw std::runtime_error("shader module");
+    if (vkCreateShaderModule(d,&ci,nullptr,&m)!=VK_SUCCESS)
+        throw std::runtime_error("shader module");
     return m;
 }
-static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) { return DefWindowProc(h,m,w,l); }
+static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    return DefWindowProc(h,m,w,l);
+}
 
 // ── ctor / dtor ──────────────────────────────────────────────
 GranularVulkanWindow::GranularVulkanWindow(QObject *p) : QObject(p) {}
 GranularVulkanWindow::~GranularVulkanWindow() { cleanupVulkan(); }
 
-// ── initialize: create raw Win32 window, then Vulkan ─────────
-void GranularVulkanWindow::initialize() {
+// ── initialize: child HWND inside Qt container ───────────────
+void GranularVulkanWindow::initialize(QWidget *container) {
+    m_container = container;
+
     HINSTANCE hi = GetModuleHandle(nullptr);
     WNDCLASSEX wc = {sizeof(WNDCLASSEX), CS_HREDRAW|CS_VREDRAW, WndProc, 0, 0, hi,
                      nullptr, nullptr, nullptr, nullptr, L"RTVK_Vulkan", nullptr};
     RegisterClassEx(&wc);
-    m_hwnd = CreateWindowExW(0, L"RTVK_Vulkan", L"RTVK Vulkan", WS_OVERLAPPEDWINDOW,
-                             CW_USEDEFAULT, CW_USEDEFAULT, 1280, 720,
-                             nullptr, nullptr, hi, nullptr);
-    ShowWindow(m_hwnd, SW_SHOW);
-    UpdateWindow(m_hwnd);
+
+    RECT r;
+    GetClientRect((HWND)container->winId(), &r);
+    m_hwnd = CreateWindowExW(0, L"RTVK_Vulkan", L"", WS_CHILD | WS_VISIBLE,
+                             0, 0, r.right - r.left, r.bottom - r.top,
+                             (HWND)container->winId(), nullptr, hi, nullptr);
+
     QTimer::singleShot(200, this, [this]{ initVulkan(); });
+}
+
+void GranularVulkanWindow::resize() {
+    if (!m_hwnd || !m_container) return;
+    RECT r;
+    GetClientRect((HWND)m_container->winId(), &r);
+    SetWindowPos(m_hwnd, nullptr, 0, 0, r.right - r.left, r.bottom - r.top,
+                 SWP_NOZORDER | SWP_NOACTIVATE);
+    if (m_vulkanReady) m_framebufferResized = true;
 }
 
 // ── Vulkan init pipeline ─────────────────────────────────────
@@ -218,8 +238,6 @@ void GranularVulkanWindow::createPipeline() {
     VkPipelineInputAssemblyStateCreateInfo ias{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
     ias.topology=VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 
-    VkViewport vp{0,0,(float)m_swapchainExtent.width,(float)m_swapchainExtent.height,0,1};
-    VkRect2D sc{{0,0},m_swapchainExtent};
     VkPipelineViewportStateCreateInfo vps{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
     vps.viewportCount=vps.scissorCount=1;
 
@@ -238,6 +256,7 @@ void GranularVulkanWindow::createPipeline() {
     VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     pli.pushConstantRangeCount = 1; pli.pPushConstantRanges = &pcr;
     vkCreatePipelineLayout(m_device, &pli, nullptr, &m_pipelineLayout);
+
     std::vector<VkDynamicState> ds{VK_DYNAMIC_STATE_VIEWPORT,VK_DYNAMIC_STATE_SCISSOR};
     VkPipelineDynamicStateCreateInfo dys{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
     dys.dynamicStateCount=(uint32_t)ds.size(); dys.pDynamicStates=ds.data();
@@ -308,11 +327,9 @@ void GranularVulkanWindow::drawFrame() {
     VkCommandBuffer cb=m_commandBuffers[m_currentFrame];
     vkResetCommandBuffer(cb,0);
 
-    // Begin
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     vkBeginCommandBuffer(cb,&bi);
 
-    // Transition to color attachment
     VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     barrier.srcAccessMask=0; barrier.dstAccessMask=VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
     barrier.oldLayout=VK_IMAGE_LAYOUT_UNDEFINED;
@@ -323,7 +340,6 @@ void GranularVulkanWindow::drawFrame() {
     vkCmdPipelineBarrier(cb,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,0,0,nullptr,0,nullptr,1,&barrier);
 
-    // Dynamic rendering
     VkRenderingAttachmentInfo att{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
     att.imageView=m_swapchainImageViews[ii];
     att.imageLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -335,7 +351,6 @@ void GranularVulkanWindow::drawFrame() {
     ri.layerCount=1; ri.colorAttachmentCount=1; ri.pColorAttachments=&att;
     vkCmdBeginRendering(cb,&ri);
 
-    // Draw triangle
     vkCmdBindPipeline(cb,VK_PIPELINE_BIND_POINT_GRAPHICS,m_graphicsPipeline);
     VkViewport vp{0,0,(float)m_swapchainExtent.width,(float)m_swapchainExtent.height,0,1};
     vkCmdSetViewport(cb,0,1,&vp);
@@ -348,7 +363,6 @@ void GranularVulkanWindow::drawFrame() {
 
     vkCmdEndRendering(cb);
 
-    // Transition to present
     barrier.srcAccessMask=VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT; barrier.dstAccessMask=0;
     barrier.oldLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     barrier.newLayout=VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
@@ -357,7 +371,6 @@ void GranularVulkanWindow::drawFrame() {
 
     vkEndCommandBuffer(cb);
 
-    // Submit
     VkPipelineStageFlags ws=VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.waitSemaphoreCount=1; si.pWaitSemaphores=&m_imageAvailableSemaphores[m_currentFrame];
@@ -366,7 +379,6 @@ void GranularVulkanWindow::drawFrame() {
     si.signalSemaphoreCount=1; si.pSignalSemaphores=&m_renderFinishedSemaphores[m_currentFrame];
     vkQueueSubmit(m_graphicsQueue,1,&si,m_inFlightFences[m_currentFrame]);
 
-    // Present
     VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
     pi.waitSemaphoreCount=1; pi.pWaitSemaphores=&m_renderFinishedSemaphores[m_currentFrame];
     pi.swapchainCount=1; pi.pSwapchains=&m_swapchain; pi.pImageIndices=&ii;

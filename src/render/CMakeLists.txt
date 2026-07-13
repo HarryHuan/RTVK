@@ -9,7 +9,7 @@ add_library(rtvk_render STATIC
 )
 target_link_libraries(rtvk_render PUBLIC
     rtvk_core
-    Qt6::Core Qt6::Gui
+    Qt6::Core Qt6::Gui Qt6::Widgets
     Vulkan::Vulkan
 )
 target_include_directories(rtvk_render PUBLIC

@@ -11,6 +11,8 @@
 #include <functional>
 #include "core/config.h"
 
+class QWidget;
+
 namespace rtvk::render {
 
 constexpr int kMaxFramesInFlight = 2;
@@ -20,7 +22,11 @@ class GranularVulkanWindow : public QObject {
 public:
     explicit GranularVulkanWindow(QObject *parent = nullptr);
     ~GranularVulkanWindow() override;
-    void initialize();
+
+    // Initialize: creates child HWND parented to container, then Vulkan
+    void initialize(QWidget *container);
+    // Sync child window size to container (call on container resize)
+    void resize();
 
     void setSimParams(const SimParams &p)  { m_simParams = p; }
     void setRenderParams(const RenderParams &p) { m_renderParams = p; }
@@ -28,8 +34,8 @@ public:
     void setFrameCallback(FrameCallback cb) { m_frameCallback = std::move(cb); }
 
     QVulkanInstance *vulkanInstance() { return &m_vulkanInstance; }
-    VkDevice device()        const { return m_device; }
-    VkExtent2D extent()      const { return m_swapchainExtent; }
+    VkDevice device()          const { return m_device; }
+    VkExtent2D extent()        const { return m_swapchainExtent; }
     VkFormat swapchainFormat() const { return m_swapchainFormat; }
 
 signals:
@@ -52,6 +58,7 @@ private:
     void drawFrame();
     bool isDeviceSuitable(VkPhysicalDevice d);
 
+    QWidget *m_container = nullptr;
     HWND m_hwnd = nullptr;
     QVulkanInstance m_vulkanInstance;
     VkPhysicalDevice m_physicalDevice = VK_NULL_HANDLE;

@@ -5,42 +5,63 @@
 #include <QDockWidget>
 #include <QStatusBar>
 #include <QLabel>
+#include <QVBoxLayout>
+#include <QResizeEvent>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
 {
-    auto *statusLabel = new QLabel("Initializing Vulkan...");
-    statusLabel->setAlignment(Qt::AlignCenter);
-    statusLabel->setStyleSheet("background-color: #1a1a2e; color: #e0e0e0; font-size: 18px;");
-    setCentralWidget(statusLabel);
+    // Container widget that will host the Vulkan child HWND
+    m_vulkanContainer = new QWidget();
+    m_vulkanContainer->setMinimumSize(400, 300);
+
+    // Status label overlay inside container
+    m_statusLabel = new QLabel("Initializing Vulkan...", m_vulkanContainer);
+    m_statusLabel->setAlignment(Qt::AlignCenter);
+    m_statusLabel->setStyleSheet(
+        "background-color: #1a1a2e; color: #e0e0e0; font-size: 18px;");
+    auto *layout = new QVBoxLayout(m_vulkanContainer);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->addWidget(m_statusLabel);
+
+    setCentralWidget(m_vulkanContainer);
 
     setupMenuBar();
     setupDockWidgets();
     statusBar()->showMessage("Starting...");
     resize(1600, 900);
 
-    // Vulkan creates its own Win32 window; Qt MainWindow is the control panel
-    QMetaObject::invokeMethod(this, [this, statusLabel]() {
+    // Delay Vulkan init so MainWindow has a valid native HWND
+    QMetaObject::invokeMethod(this, [this]() {
         m_vulkanWindow = new rtvk::render::GranularVulkanWindow(this);
 
         QObject::connect(m_vulkanWindow, &rtvk::render::GranularVulkanWindow::vulkanReady,
-            this, [this, statusLabel]() {
-                statusLabel->setText("Vulkan Ready — see RTVK Vulkan window");
+            this, [this]() {
+                m_statusLabel->hide();   // hide overlay, show Vulkan
                 statusBar()->showMessage("Vulkan Ready");
             });
 
         QObject::connect(m_vulkanWindow, &rtvk::render::GranularVulkanWindow::vulkanError,
-            this, [this, statusLabel](const QString &msg) {
-                statusLabel->setText("Vulkan Error:\n" + msg);
-                statusLabel->setStyleSheet("background-color: #2e1a1a; color: #ff6060; font-size: 13px; padding: 20px;");
+            this, [this](const QString &msg) {
+                m_statusLabel->setText("Vulkan Error:\n" + msg);
+                m_statusLabel->setStyleSheet(
+                    "background-color: #2e1a1a; color: #ff6060; font-size: 13px; padding: 20px;");
+                m_statusLabel->show();
                 statusBar()->showMessage("Vulkan Error");
             });
 
-        m_vulkanWindow->initialize();
+        m_vulkanWindow->initialize(m_vulkanContainer);
     }, Qt::QueuedConnection);
 }
 
 MainWindow::~MainWindow() = default;
+
+void MainWindow::resizeEvent(QResizeEvent *e)
+{
+    QMainWindow::resizeEvent(e);
+    if (m_vulkanWindow)
+        m_vulkanWindow->resize();
+}
 
 void MainWindow::setupMenuBar()
 {
