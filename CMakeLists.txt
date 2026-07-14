@@ -11,7 +11,7 @@ find_package(Vulkan REQUIRED)
 
 # SPIR-V compilation
 set(SHADER_OUT_DIR ${CMAKE_BINARY_DIR}/shaders)
-file(GLOB SHADER_SOURCES "shaders/common/*" "shaders/sim/*" "shaders/render/*")
+file(GLOB SHADER_SOURCES "shaders/common/*" "shaders/sim/*" "shaders/render/*" "shaders/particle/*")
 set(ALL_SPV_FILES "")
 foreach(SHADER ${SHADER_SOURCES})
     get_filename_component(SHADER_NAME ${SHADER} NAME)

@@ -23,15 +23,16 @@ public:
     explicit GranularVulkanWindow(QObject *parent = nullptr);
     ~GranularVulkanWindow() override;
 
-    // Initialize: creates child HWND parented to container, then Vulkan
     void initialize(QWidget *container);
-    // Sync child window size to container (call on container resize)
     void resize();
 
     void setSimParams(const SimParams &p)  { m_simParams = p; }
     void setRenderParams(const RenderParams &p) { m_renderParams = p; }
     using FrameCallback = std::function<void(VkCommandBuffer, uint32_t)>;
     void setFrameCallback(FrameCallback cb) { m_frameCallback = std::move(cb); }
+
+    // Particle rendering
+    void updateParticles(const std::vector<glm::vec3> &positions);
 
     QVulkanInstance *vulkanInstance() { return &m_vulkanInstance; }
     VkDevice device()          const { return m_device; }
@@ -51,11 +52,14 @@ private:
     void createLogicalDevice();
     void createSwapchain();
     void cleanupSwapchain();
-    void createPipeline();
+    void createTrianglePipeline();
+    void createParticlePipeline();
+    void createParticleBuffers();
     void createCommandPool();
     void createCommandBuffers();
     void createSyncObjects();
     void drawFrame();
+    void drawParticles(VkCommandBuffer cb, uint32_t imageIndex);
     bool isDeviceSuitable(VkPhysicalDevice d);
 
     QWidget *m_container = nullptr;
@@ -71,8 +75,19 @@ private:
     std::vector<VkImageView> m_swapchainImageViews;
     VkFormat m_swapchainFormat = VK_FORMAT_UNDEFINED;
     VkExtent2D m_swapchainExtent{};
-    VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
-    VkPipeline m_graphicsPipeline = VK_NULL_HANDLE;
+
+    // Triangle pipeline
+    VkPipelineLayout m_trianglePipelineLayout = VK_NULL_HANDLE;
+    VkPipeline m_trianglePipeline = VK_NULL_HANDLE;
+
+    // Particle pipeline
+    VkPipelineLayout m_particlePipelineLayout = VK_NULL_HANDLE;
+    VkPipeline m_particlePipeline = VK_NULL_HANDLE;
+    VkBuffer m_particleVertexBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_particleVertexMemory = VK_NULL_HANDLE;
+    size_t m_particleCount = 0;
+    bool m_particlePipelineReady = false;
+
     VkCommandPool m_commandPool = VK_NULL_HANDLE;
     std::vector<VkCommandBuffer> m_commandBuffers;
     std::vector<VkSemaphore> m_imageAvailableSemaphores, m_renderFinishedSemaphores;

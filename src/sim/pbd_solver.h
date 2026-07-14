@@ -11,7 +11,7 @@ struct Particle
     glm::vec3 position;
     glm::vec3 velocity;
     glm::vec3 predictedPosition; // PBD intermediate
-    float invMass = 1.0f;
+    float invMass = 1.0f;        // 1 / mass
     float radius = 0.01f;
 };
 

@@ -33,3 +33,5 @@ qrc_*.cpp
 # OS
 Thumbs.db
 Desktop.ini
+
+vk.log
