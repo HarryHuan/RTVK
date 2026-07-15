@@ -1,0 +1,57 @@
+#version 450
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(constant_id = 0) const uint PARTICLE_COUNT = 1024;
+
+layout(push_constant) uniform PushConsts
+{
+    float deltaTime;
+    vec3  gravity;
+    float damping;
+    uint  mode;
+} pc;
+
+struct Particle
+{
+    vec3  position;
+    vec3  velocity;
+    vec3  predictedPos;
+    float invMass;
+    float radius;
+    float _pad0;
+    float _pad1;
+};
+
+layout(std430, set = 0, binding = 0) buffer ParticleBuf { Particle data[]; } particleBuf;
+
+void main()
+{
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= PARTICLE_COUNT) return;
+
+    Particle p = particleBuf.data[idx];
+
+    // UNCONDITIONAL TEST: does shader execute?
+    p.position.y -= 0.005;
+
+    if (pc.mode == 0u)
+    {
+        if (p.invMass > 0.0)
+        {
+            p.velocity += pc.gravity * pc.deltaTime;
+            p.velocity *= (1.0 - pc.damping * pc.deltaTime);
+            p.predictedPos = p.position + p.velocity * pc.deltaTime;
+        }
+    }
+
+    if (pc.mode == 1u)
+    {
+        if (p.invMass > 0.0)
+        {
+            float invDt = 1.0 / pc.deltaTime;
+            p.velocity = (p.predictedPos - p.position) * invDt;
+        }
+        p.position = p.predictedPos;
+    }
+
+    particleBuf.data[idx] = p;
+}

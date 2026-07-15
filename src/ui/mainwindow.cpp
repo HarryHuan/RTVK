@@ -1,6 +1,7 @@
 #include "mainwindow.h"
 #include "render/vulkan_window.h"
 #include "sim/pbd_solver.h"
+#include <glm/glm.hpp>
 
 #include <QMenuBar>
 #include <QDockWidget>
@@ -73,30 +74,43 @@ void MainWindow::startSimulation()
 
     m_solver = std::make_unique<rtvk::sim::PBDSolver>(params);
 
-    // Push initial positions to renderer
+    // Upload initial positions for first frame
     std::vector<glm::vec3> positions;
     for (const auto &p : m_solver->particles())
-    {
         positions.push_back(p.position);
-    }
     m_vulkanWindow->updateParticles(positions);
 
-    statusBar()->showMessage(
-        QString("Particles: %1  |  PBD Solver running")
-            .arg(m_solver->particleCount()));
+    // Initialize GPU simulation
+    m_vulkanWindow->initGpuSimulation(
+        (uint32_t)m_solver->particleCount(), params.particleRadius, params);
 
-    // Simulation timer ~60fps
+    // Upload initial particle data to GPU
+    std::vector<rtvk::render::GpuParticle> gpuParticles;
+    gpuParticles.reserve(m_solver->particleCount());
+    for (const auto &p : m_solver->particles())
+    {
+        rtvk::render::GpuParticle gp{};
+        gp.posX = p.position.x; gp.posY = p.position.y; gp.posZ = p.position.z;
+        gp.velX = p.velocity.x; gp.velY = p.velocity.y; gp.velZ = p.velocity.z;
+        gp.predX = p.predictedPosition.x; gp.predY = p.predictedPosition.y; gp.predZ = p.predictedPosition.z;
+        gp.invMass = p.invMass; gp.radius = p.radius;
+        gpuParticles.push_back(gp);
+    }
+    m_vulkanWindow->uploadParticleData(gpuParticles);
+
+    m_solver.reset();
+
+    statusBar()->showMessage(
+        QString("Particles: %1  |  GPU Compute + CPU render")
+            .arg(m_vulkanWindow->gpuSimParticleCount()));
+
+    // GPU simulation + CPU readback for rendering
     auto *simTimer = new QTimer(this);
     connect(simTimer, &QTimer::timeout, this, [this]() {
-        m_solver->step(1.0f / 60.0f);
-
-        std::vector<glm::vec3> positions;
-        positions.reserve(m_solver->particleCount());
-        for (const auto &p : m_solver->particles())
-        {
-            positions.push_back(p.position);
-        }
-        m_vulkanWindow->updateParticles(positions);
+        m_vulkanWindow->gpuSimStep(1.0f / 60.0f);
+        auto pos = m_vulkanWindow->gpuSimGetPositions();
+        if (!pos.empty())
+            m_vulkanWindow->updateParticles(pos);
     });
     simTimer->start(16);
 }

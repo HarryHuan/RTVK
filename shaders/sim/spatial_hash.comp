@@ -1,0 +1,88 @@
+#version 450
+// spatial_hash.comp -- GPU spatial hashing for particle neighbor search
+// Each workgroup handles 256 particles; dispatch with ceil(N/256, 1, 1)
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+// -- Constants (specialization constants) -------------------
+layout(constant_id = 0) const uint PARTICLE_COUNT = 1024;
+layout(constant_id = 1) const uint HASH_TABLE_SIZE = 2048;
+layout(constant_id = 2) const float CELL_SIZE = 0.02;
+
+// -- Particle input (read-only positions) -------------------
+struct Particle
+{
+    vec3  position;
+    vec3  velocity;
+    vec3  predictedPos;
+    float invMass;
+    float radius;
+    float _pad0;
+    float _pad1;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer ParticleInBuf
+{
+    Particle data[];
+} particleIn;
+
+// -- Hash table output --------------------------------------
+struct CellInfo
+{
+    uint startOffset;
+    uint numParticles;
+};
+
+layout(std430, set = 0, binding = 1) buffer HashTableBuf
+{
+    CellInfo cells[];
+} hashTableBuf;
+
+// -- Particle hash + sorted index output --------------------
+struct SortedParticle
+{
+    uint cellHash;
+    uint particleIndex;
+};
+
+layout(std430, set = 0, binding = 2) buffer ParticleCellBuf
+{
+    SortedParticle entries[];
+} particleCellBuf;
+
+// -- Cell offsets (for compaction) --------------------------
+layout(std430, set = 0, binding = 3) buffer CellOffsetBuf
+{
+    uint data[];
+} cellOffsetBuf;
+
+// -- Spatial hash function (large primes for 3D) ------------
+uint hashCell(ivec3 cell)
+{
+    uint h = uint(cell.x) * 73856093u;
+    h = h ^ (uint(cell.y) * 19349663u);
+    h = h ^ (uint(cell.z) * 83492791u);
+    return h % HASH_TABLE_SIZE;
+}
+
+void main()
+{
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= PARTICLE_COUNT) return;
+
+    // Compute cell coordinates from predicted position
+    vec3 pos = particleIn.data[idx].predictedPos;
+    ivec3 cell = ivec3(floor(pos / CELL_SIZE));
+
+    uint cellHash = hashCell(cell);
+
+    // Atomic increment to reserve a slot in cell
+    uint slotIndex = atomicAdd(hashTableBuf.cells[cellHash].numParticles, 1u);
+
+    // Write per-particle cell assignment
+    particleCellBuf.entries[idx].cellHash = cellHash;
+    particleCellBuf.entries[idx].particleIndex = idx;
+
+    // Write slot offset for later compaction
+    cellOffsetBuf.data[idx] = slotIndex;
+}

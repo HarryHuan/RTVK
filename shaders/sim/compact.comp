@@ -1,0 +1,233 @@
+#version 450
+// compact.comp — Prefix sum on hash table + scatter particles into sorted order
+//
+// Phase 0: Per-block exclusive prefix sum on cell numParticles → startOffset
+//          Stores block totals to blockSums
+// Phase 1: Exclusive prefix sum on blockSums (single workgroup)
+// Phase 2: Add block offsets to startOffsets + scatter particles to sorted list
+//
+// Phase is selected by push constant.
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(constant_id = 0) const uint HASH_TABLE_SIZE = 2048;
+layout(constant_id = 1) const uint PARTICLE_COUNT = 1024;
+
+// Elements per workgroup (each thread handles 2)
+const uint ELEMS_PER_WG = 512u;
+const uint NUM_BLOCKS = (HASH_TABLE_SIZE + ELEMS_PER_WG - 1u) / ELEMS_PER_WG;
+
+// Push constant: 0 = per-block scan, 1 = block-sum scan, 2 = add offsets + scatter
+layout(push_constant) uniform PushConsts
+{
+    uint phase;
+} pc;
+
+// — Hash table (cell info: startOffset written by prefix sum, numParticles unchanged) —
+struct CellInfo
+{
+    uint startOffset;
+    uint numParticles;
+};
+
+layout(std430, set = 0, binding = 0) buffer HashTableBuf
+{
+    CellInfo cells[];
+} hashTableBuf;
+
+// — Block sums (NUM_BLOCKS elements) —
+layout(std430, set = 0, binding = 1) buffer BlockSumsBuf
+{
+    uint data[];
+} blockSumsBuf;
+
+// — Unsorted particle cells (input for scatter) —
+struct SortedParticle
+{
+    uint cellHash;
+    uint particleIndex;
+};
+
+layout(std430, set = 0, binding = 2) readonly buffer ParticleCellBuf
+{
+    SortedParticle entries[];
+} particleCellBuf;
+
+// — Per-particle slot within cell (input for scatter) —
+layout(std430, set = 0, binding = 3) readonly buffer SlotBuf
+{
+    uint data[];
+} slotBuf;
+
+// — Sorted output —
+layout(std430, set = 0, binding = 4) buffer SortedOutBuf
+{
+    SortedParticle entries[];
+} sortedOutBuf;
+
+shared uint s_data[512];
+
+// — Phase 0: Per-block exclusive prefix sum —
+void phase0()
+{
+    uint tid = gl_LocalInvocationID.x;
+    uint block = gl_WorkGroupID.x;
+    uint base = block * ELEMS_PER_WG;
+
+    // Load 2 elements per thread into shared memory
+    uint idx0 = base + tid;
+    uint idx1 = base + tid + 256u;
+
+    s_data[tid]        = (idx0 < HASH_TABLE_SIZE) ? hashTableBuf.cells[idx0].numParticles : 0u;
+    s_data[tid + 256u] = (idx1 < HASH_TABLE_SIZE) ? hashTableBuf.cells[idx1].numParticles : 0u;
+
+    barrier();
+    memoryBarrierShared();
+
+    // Upsweep (inclusive scan → last element = sum)
+    uint offset = 1u;
+    for (uint d = ELEMS_PER_WG >> 1u; d > 0u; d >>= 1u)
+    {
+        barrier();
+        if (tid < d)
+        {
+            uint ai = offset * (2u * tid + 1u) - 1u;
+            uint bi = offset * (2u * tid + 2u) - 1u;
+            s_data[bi] += s_data[ai];
+        }
+        offset <<= 1u;
+    }
+
+    // Store block total
+    if (tid == 0u)
+    {
+        blockSumsBuf.data[block] = s_data[ELEMS_PER_WG - 1u];
+        s_data[ELEMS_PER_WG - 1u] = 0u; // clear last for exclusive scan
+    }
+
+    // Downsweep
+    for (uint d = 1u; d < ELEMS_PER_WG; d <<= 1u)
+    {
+        offset >>= 1u;
+        barrier();
+        if (tid < d)
+        {
+            uint ai = offset * (2u * tid + 1u) - 1u;
+            uint bi = offset * (2u * tid + 2u) - 1u;
+            uint t = s_data[ai];
+            s_data[ai] = s_data[bi];
+            s_data[bi] += t;
+        }
+    }
+
+    barrier();
+
+    // Write exclusive prefix sum to startOffset
+    if (idx0 < HASH_TABLE_SIZE)
+        hashTableBuf.cells[idx0].startOffset = s_data[tid];
+    if (idx1 < HASH_TABLE_SIZE)
+        hashTableBuf.cells[idx1].startOffset = s_data[tid + 256u];
+}
+
+// — Phase 1: Exclusive prefix sum on block sums —
+void phase1()
+{
+    uint tid = gl_LocalInvocationID.x;
+
+    // Load block sums
+    uint val = (tid < NUM_BLOCKS) ? blockSumsBuf.data[tid] : 0u;
+    s_data[tid] = val;
+
+    barrier();
+    memoryBarrierShared();
+
+    // Upsweep
+    uint offset = 1u;
+    for (uint d = 256u >> 1u; d > 0u; d >>= 1u)
+    {
+        barrier();
+        if (tid < d)
+        {
+            uint ai = offset * (2u * tid + 1u) - 1u;
+            uint bi = offset * (2u * tid + 2u) - 1u;
+            s_data[bi] += s_data[ai];
+        }
+        offset <<= 1u;
+    }
+
+    // Store total, clear last
+    if (tid == 0u)
+    {
+        s_data[255u] = 0u;
+    }
+
+    // Downsweep
+    for (uint d = 1u; d < 256u; d <<= 1u)
+    {
+        offset >>= 1u;
+        barrier();
+        if (tid < d)
+        {
+            uint ai = offset * (2u * tid + 1u) - 1u;
+            uint bi = offset * (2u * tid + 2u) - 1u;
+            uint t = s_data[ai];
+            s_data[ai] = s_data[bi];
+            s_data[bi] += t;
+        }
+    }
+
+    barrier();
+
+    // Write back exclusive block sums
+    if (tid < NUM_BLOCKS)
+        blockSumsBuf.data[tid] = s_data[tid];
+}
+
+// — Phase 2: Add block offsets + scatter particles —
+void phase2()
+{
+    uint tid = gl_LocalInvocationID.x;
+    uint block = gl_WorkGroupID.x;
+    uint base = block * ELEMS_PER_WG;
+
+    // Add block offset to startOffset values in hash table
+    uint blockOffset = blockSumsBuf.data[block];
+
+    uint idx0 = base + tid;
+    uint idx1 = base + tid + 256u;
+
+    if (idx0 < HASH_TABLE_SIZE)
+        hashTableBuf.cells[idx0].startOffset += blockOffset;
+    if (idx1 < HASH_TABLE_SIZE)
+        hashTableBuf.cells[idx1].startOffset += blockOffset;
+
+    // Scatter: each particle thread scatters its own particle
+    // But this is a hash-table-sized dispatch, not particle-sized
+    // For scatter, we dispatch with ceil(PARTICLE_COUNT/256) workgroups separately
+}
+
+// — Phase 3: Scatter particles to sorted list —
+// Dispatched with ceil(PARTICLE_COUNT/256) workgroups
+void phase3()
+{
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= PARTICLE_COUNT) return;
+
+    uint cellHash = particleCellBuf.entries[idx].cellHash;
+    uint slot = slotBuf.data[idx];
+    uint dest = hashTableBuf.cells[cellHash].startOffset + slot;
+
+    sortedOutBuf.entries[dest].cellHash = cellHash;
+    sortedOutBuf.entries[dest].particleIndex = particleCellBuf.entries[idx].particleIndex;
+}
+
+void main()
+{
+    switch (pc.phase)
+    {
+    case 0u: phase0(); break;
+    case 1u: phase1(); break;
+    case 2u: phase2(); break;
+    case 3u: phase3(); break;
+    }
+}

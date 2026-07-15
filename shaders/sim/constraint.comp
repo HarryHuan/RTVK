@@ -1,0 +1,138 @@
+#version 450
+// constraint.comp -- GPU PBD constraint projection with spatial hash neighbor search
+// Each workgroup handles 256 particles; dispatch with ceil(N/256, 1, 1)
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(constant_id = 0) const uint PARTICLE_COUNT = 1024;
+layout(constant_id = 1) const uint HASH_TABLE_SIZE = 2048;
+layout(constant_id = 2) const float CELL_SIZE = 0.02;
+layout(constant_id = 3) const float DOMAIN_MIN_Y = -1.0;
+layout(constant_id = 4) const float DOMAIN_MAX_Y = 1.0;
+layout(constant_id = 5) const float DOMAIN_MIN_X = -1.0;
+layout(constant_id = 6) const float DOMAIN_MAX_X = 1.0;
+layout(constant_id = 7) const float DOMAIN_MIN_Z = -1.0;
+layout(constant_id = 8) const float DOMAIN_MAX_Z = 1.0;
+
+// -- Particle buffer (read-write for position correction) -------
+struct Particle
+{
+    vec3  position;
+    vec3  velocity;
+    vec3  predictedPos;
+    float invMass;
+    float radius;
+    float _pad0;
+    float _pad1;
+};
+
+layout(std430, set = 0, binding = 0) buffer ParticleBuffer
+{
+    Particle data[];
+} particles;
+
+// -- Hash table (read-only, startOffset set by compact) ----------
+struct CellInfo
+{
+    uint startOffset;
+    uint numParticles;
+};
+
+layout(std430, set = 0, binding = 1) readonly buffer HashTableBuf
+{
+    CellInfo cells[];
+} hashTableBuf;
+
+// -- Sorted particle list (read-only, populated by compact) ------
+struct SortedParticle
+{
+    uint cellHash;
+    uint particleIndex;
+};
+
+layout(std430, set = 0, binding = 2) readonly buffer SortedListBuf
+{
+    SortedParticle entries[];
+} sortedListBuf;
+
+// -- Spatial hash function (must match spatial_hash.comp) -------
+uint hashCell(ivec3 cell)
+{
+    uint h = uint(cell.x) * 73856093u;
+    h = h ^ (uint(cell.y) * 19349663u);
+    h = h ^ (uint(cell.z) * 83492791u);
+    return h % HASH_TABLE_SIZE;
+}
+
+// -- Neighbor cell offsets (3x3x3 = 27) ------------------------
+const ivec3 NEIGHBOR[27] = ivec3[](
+    ivec3(-1,-1,-1), ivec3( 0,-1,-1), ivec3( 1,-1,-1),
+    ivec3(-1, 0,-1), ivec3( 0, 0,-1), ivec3( 1, 0,-1),
+    ivec3(-1, 1,-1), ivec3( 0, 1,-1), ivec3( 1, 1,-1),
+    ivec3(-1,-1, 0), ivec3( 0,-1, 0), ivec3( 1,-1, 0),
+    ivec3(-1, 0, 0), ivec3( 0, 0, 0), ivec3( 1, 0, 0),
+    ivec3(-1, 1, 0), ivec3( 0, 1, 0), ivec3( 1, 1, 0),
+    ivec3(-1,-1, 1), ivec3( 0,-1, 1), ivec3( 1,-1, 1),
+    ivec3(-1, 0, 1), ivec3( 0, 0, 1), ivec3( 1, 0, 1),
+    ivec3(-1, 1, 1), ivec3( 0, 1, 1), ivec3( 1, 1, 1)
+);
+
+void main()
+{
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= PARTICLE_COUNT) return;
+
+    Particle p = particles.data[idx];
+    if (p.invMass <= 0.0) return;
+
+    vec3 correction = vec3(0.0);
+    ivec3 myCell = ivec3(floor(p.predictedPos / CELL_SIZE));
+
+    // -- Neighbor search over 27 cells -----------------------
+    for (int ni = 0; ni < 27; ++ni)
+    {
+        ivec3 neighborCell = myCell + NEIGHBOR[ni];
+        uint cellHash = hashCell(neighborCell);
+
+        CellInfo ci = hashTableBuf.cells[cellHash];
+        uint startOff = ci.startOffset;
+        uint numParts = ci.numParticles;
+        if (numParts == 0u) continue;
+
+        uint endOff = startOff + numParts;
+        for (uint si = startOff; si < endOff && si < PARTICLE_COUNT; ++si)
+        {
+            uint jIdx = sortedListBuf.entries[si].particleIndex;
+            if (jIdx == idx) continue;
+            if (jIdx >= PARTICLE_COUNT) break;
+
+            Particle other = particles.data[jIdx];
+            float wSum = p.invMass + other.invMass;
+            if (wSum < 1e-6) continue;
+
+            vec3 delta = p.predictedPos - other.predictedPos;
+            float dist = length(delta);
+            float minDist = p.radius + other.radius;
+            if (dist >= minDist || dist < 1e-6) continue;
+
+            vec3 n = delta / dist;
+            float corr = (minDist - dist) / wSum;
+            correction += n * corr * p.invMass;
+        }
+    }
+
+    // Apply accumulated correction
+    particles.data[idx].predictedPos += correction;
+
+    // -- Ground plane & domain wall collision ---------------
+    vec3 pp = particles.data[idx].predictedPos;
+    float r = p.radius;
+
+    float groundY = DOMAIN_MIN_Y + r;
+    if (pp.y < groundY) pp.y = groundY;
+
+    pp.x = clamp(pp.x, DOMAIN_MIN_X + r, DOMAIN_MAX_X - r);
+    pp.z = clamp(pp.z, DOMAIN_MIN_Z + r, DOMAIN_MAX_Z - r);
+
+    particles.data[idx].predictedPos = pp;
+}
