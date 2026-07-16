@@ -8,4 +8,5 @@ target_link_libraries(rtvk_core PUBLIC Qt6::Core)
 target_include_directories(rtvk_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/include
 )
