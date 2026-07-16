@@ -15,7 +15,8 @@ struct Particle
     vec3  position;
     vec3  velocity;
     vec3  predictedPos;
-    float invMass;
+    float invMass; // std430 中 vec3 占 12 字节，可与后续 float 共用 16 字节槽。
+                   // CPU 侧 GpuParticle 必须让 invMass 紧跟 predZ，偏移为 44。
     float radius;
     float _pad0;
     float _pad1;
@@ -29,9 +30,6 @@ void main()
     if (idx >= PARTICLE_COUNT) return;
 
     Particle p = particleBuf.data[idx];
-
-    // UNCONDITIONAL TEST: does shader execute?
-    p.position.y -= 0.005;
 
     if (pc.mode == 0u)
     {

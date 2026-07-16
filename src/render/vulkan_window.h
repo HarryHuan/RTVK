@@ -7,8 +7,9 @@
 #include <vulkan/vulkan.h>
 #include <QObject>
 #include <QVulkanInstance>
-#include <vector>
+#include <cstddef>
 #include <functional>
+#include <vector>
 #include "core/config.h"
 
 class QWidget;
@@ -17,18 +18,20 @@ namespace rtvk::render {
 
 constexpr int kMaxFramesInFlight = 2;
 
-// ─── GPU particle data layout (matches shader std430) ────────────
+// ─── GPU 粒子数据布局，必须匹配 shader std430 偏移 ────────────
 struct GpuParticle
 {
-    float posX, posY, posZ, posPadding;        // vec3 + pad
+    float posX, posY, posZ, posPadding;
     float velX, velY, velZ, velPadding;
-    float predX, predY, predZ, predPadding;
-    float invMass;
+    float predX, predY, predZ, invMass;
     float radius;
     float _pad0;
     float _pad1;
+    float _pad2;
 };
 static_assert(sizeof(GpuParticle) == 64, "GpuParticle must be 64 bytes");
+static_assert(offsetof(GpuParticle, invMass) == 44, "GpuParticle invMass offset mismatch");
+static_assert(offsetof(GpuParticle, radius) == 48, "GpuParticle radius offset mismatch");
 
 struct CellEntry
 {
