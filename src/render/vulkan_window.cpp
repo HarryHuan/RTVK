@@ -905,6 +905,8 @@ namespace rtvk::render
             (float)m_swapchainExtent.width /
                 (float)m_swapchainExtent.height,
             0.1f, 10.0f);
+        // Vulkan 的视口 Y 轴方向与 GLM 默认投影相反，需要翻转投影矩阵的 Y 分量。
+        proj[1][1] *= -1.0f;
         glm::mat4 view = glm::lookAt(
             glm::vec3(0.8f, 1.5f, 1.2f),  // camera position
             glm::vec3(0.0f, 0.5f, 0.0f),  // look at center of pile
